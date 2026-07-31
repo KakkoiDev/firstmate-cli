@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# firstmate — boot (or attach to) the firstmate tmux session with Pi loaded.
+#
+# Usage: firstmate
+#
+# Creates the tmux session "firstmate-main" in ~/Code/firstmate and launches
+# Pi in it, or attaches to the session if it already exists. Works from any
+# directory. If run outside a terminal (e.g. from a script), prints attach
+# instructions instead of attaching.
+#
+# Environment:
+#   FIRSTMATE_DIR      firstmate repo location (default: $HOME/Code/firstmate)
+#   FIRSTMATE_SESSION  tmux session name (default: firstmate-main)
+#   PI_STARTUP_WAIT    seconds to wait for Pi to boot (default: 3)
+set -eu
+
+FM_DIR="${FIRSTMATE_DIR:-$HOME/Code/firstmate}"
+SESSION="${FIRSTMATE_SESSION:-firstmate-main}"
+
+usage() {
+  cat >&2 <<EOF
+usage: firstmate [-h|--help]
+
+Boot or attach to the firstmate tmux session ($SESSION) with Pi loaded.
+If the session already exists, attaches to it instead.
+
+Environment:
+  FIRSTMATE_DIR      firstmate repo location (default: \$HOME/Code/firstmate)
+  FIRSTMATE_SESSION  tmux session name (default: firstmate-main)
+EOF
+  exit "${1:-0}"
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help) usage 0 ;;
+    *) echo "error: unknown argument: $arg" >&2; usage 1 ;;
+  esac
+done
+
+die() { echo "error: $*" >&2; exit 1; }
+
+command -v tmux >/dev/null 2>&1 || die "tmux is not installed (brew install tmux)"
+command -v pi >/dev/null 2>&1 || die "pi is not installed (npm i -g @earendil-works/pi-coding-agent)"
+[ -d "$FM_DIR" ] || die "firstmate repo not found at $FM_DIR (FIRSTMATE_DIR)"
+
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "Attaching to existing firstmate session: $SESSION"
+  if [ -t 0 ] && [ -t 1 ]; then
+    exec tmux attach-session -t "$SESSION"
+  fi
+  echo "  (not a terminal; attach manually: tmux attach -t $SESSION)"
+  exit 0
+fi
+
+PI_BIN="$(command -v pi)"
+
+echo "Starting firstmate in $FM_DIR ..."
+
+tmux new-session -d -s "$SESSION" -c "$FM_DIR" -n "firstmate"
+tmux send-keys -t "$SESSION:firstmate" "cd \"$FM_DIR\" && \"$PI_BIN\"" Enter
+
+# Give Pi a moment to boot, then confirm the session survived.
+sleep "${PI_STARTUP_WAIT:-3}"
+tmux has-session -t "$SESSION" 2>/dev/null || {
+  die "session $SESSION died during startup; check the pane for errors: tmux attach -t $SESSION"
+}
+
+echo "Firstmate session '$SESSION' started with Pi."
+echo "  Attach:  tmux attach -t $SESSION"
+echo "  Detach:  prefix + d"
+
+if [ -t 0 ] && [ -t 1 ]; then
+  exec tmux attach-session -t "$SESSION"
+fi
+echo "  (not a terminal; attach manually: tmux attach -t $SESSION)"
