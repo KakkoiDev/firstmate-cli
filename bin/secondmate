@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# secondmate — adopt a git worktree into the firstmate fleet.
+#
+# Usage: secondmate <worktree-path> [--name <id>] [--mode no-mistakes|direct-PR|local-only] [--yolo] [--persist] [--cleanup]
+#
+# Takes any git worktree, detects the project from its origin remote,
+# registers it in firstmate's data/projects.md, and clones it into
+# projects/<name>/. With --persist it also provisions a persistent
+# secondmate home that survives restarts. Firstmate becomes immediately
+# aware of the project and can dispatch crewmates for it.
+#
+# --cleanup unregisters the project and removes the clone; the worktree
+# itself is never touched.
+#
+# Environment:
+#   FIRSTMATE_DIR  firstmate repo location (default: $HOME/Code/firstmate)
+#   FM_HOME        data home holding data/ and projects/
+#                  (default: $FIRSTMATE_DIR)
+set -eu
+
+FM_DIR="${FIRSTMATE_DIR:-$HOME/Code/firstmate}"
+FM_HOME="${FM_HOME:-$FM_DIR}"
+DATA="$FM_HOME/data"
+PROJECTS="$FM_HOME/projects"
+REG="$DATA/projects.md"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+usage: secondmate <worktree-path> [--name <id>] [--mode no-mistakes|direct-PR|local-only] [--yolo] [--persist] [--cleanup]
+
+Adopt a git worktree so firstmate can dispatch crewmates for its project.
+The project is detected from the worktree's origin remote, registered in
+firstmate's data/projects.md, and cloned into projects/<name>/.
+
+  --name      Secondmate id (default: derived from the project name)
+  --mode      Delivery mode (default: no-mistakes)
+  --yolo      Let firstmate make routine merge decisions
+  --persist   Create a persistent secondmate home (survives restarts)
+  --cleanup   Unregister the project and remove its clone (worktree untouched)
+  -h, --help  Show this help
+
+Environment:
+  FIRSTMATE_DIR  firstmate repo location (default: $HOME/Code/firstmate)
+  FM_HOME        data home holding data/ and projects/ (default: $FIRSTMATE_DIR)
+EOF
+}
+
+# A project is already registered when a registry line starts with "- <name> ".
+registered() {
+  [ -f "$REG" ] && awk -v p="$1" '$1=="-" && $2==p { found=1 } END { exit found ? 0 : 1 }' "$REG"
+}
+
+# ── parse args ──────────────────────────────────────────────────────
+
+WORKTREE=""
+NAME=""
+MODE="no-mistakes"
+YOLO=""
+PERSIST=""
+CLEANUP=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --name)
+      [ $# -ge 2 ] || die "--name requires a value"
+      shift; NAME="$1"
+      ;;
+    --mode)
+      [ $# -ge 2 ] || die "--mode requires a value"
+      shift; MODE="$1"
+      case "$MODE" in
+        no-mistakes|direct-PR|local-only) ;;
+        *) die "unknown mode '$MODE' (use no-mistakes, direct-PR, or local-only)" ;;
+      esac
+      ;;
+    --yolo) YOLO="1" ;;
+    --persist) PERSIST="1" ;;
+    --cleanup) CLEANUP="1" ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "unknown flag: $1" ;;
+    *)
+      [ -z "$WORKTREE" ] || die "only one worktree path may be given (got '$WORKTREE' and '$1')"
+      WORKTREE="$1"
+      ;;
+  esac
+  shift
+done
+
+[ -n "$WORKTREE" ] || { usage >&2; exit 1; }
+[ -d "$WORKTREE" ] || die "$WORKTREE is not a directory"
+git -C "$WORKTREE" rev-parse --git-dir >/dev/null 2>&1 \
+  || die "$WORKTREE is not a git repository (no .git)"
+
+# The default FM_HOME lives inside the firstmate repo, so that repo must exist
+# unless FM_HOME was pointed elsewhere explicitly.
+if [ -z "${FM_HOME:-}" ] && [ ! -d "$FM_DIR" ]; then
+  die "firstmate repo not found at $FM_DIR (clone it, or set FIRSTMATE_DIR/FM_HOME)"
+fi
+
+# ── detect project from the worktree's origin remote ────────────────
+
+REMOTE="$(git -C "$WORKTREE" remote get-url origin 2>/dev/null || true)"
+[ -n "$REMOTE" ] || die "no 'origin' remote in $WORKTREE (git -C $WORKTREE remote add origin <url>)"
+
+PROJECT="$(basename "$REMOTE" .git)"
+case "$PROJECT" in
+  ""|.|..) die "could not derive a project name from remote '$REMOTE'" ;;
+  *[![:alnum:]_.-]*) die "project name '$PROJECT' from '$REMOTE' contains unsafe characters" ;;
+esac
+[ -n "$NAME" ] || NAME="$PROJECT"
+
+DEFAULT_BRANCH="$(git -C "$WORKTREE" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || true)"
+[ -n "$DEFAULT_BRANCH" ] || DEFAULT_BRANCH="main"
+
+# ── cleanup ──────────────────────────────────────────────────────────
+
+if [ -n "$CLEANUP" ]; then
+  CLONE="$PROJECTS/$PROJECT"
+  echo "Cleaning up $NAME ($PROJECT) ..."
+
+  if registered "$PROJECT"; then
+    awk -v p="$PROJECT" '$1=="-" && $2==p { next } { print }' "$REG" > "$REG.tmp" \
+      && mv "$REG.tmp" "$REG"
+    echo "  Removed $PROJECT from $REG"
+  else
+    echo "  $PROJECT is not registered in $REG"
+  fi
+
+  if [ -d "$CLONE" ]; then
+    CLONE_REMOTE="$(git -C "$CLONE" remote get-url origin 2>/dev/null || true)"
+    if [ "$CLONE_REMOTE" = "$REMOTE" ]; then
+      rm -rf "$CLONE"
+      echo "  Removed clone: $CLONE"
+    else
+      echo "  warning: $CLONE exists but its origin ($CLONE_REMOTE) differs from $REMOTE; leaving it" >&2
+    fi
+  else
+    echo "  No clone at $CLONE"
+  fi
+
+  SM_HOME="$HOME/.local/share/firstmate-secondmates/$NAME"
+  if [ -d "$SM_HOME" ]; then
+    echo "  Persistent secondmate home remains at $SM_HOME"
+    echo "  To remove: $FM_DIR/bin/fm-teardown.sh $NAME"
+    echo "  (refuses while work is in flight)"
+  fi
+
+  echo
+  echo "Done. Your worktree at $WORKTREE is untouched."
+  exit 0
+fi
+
+# ── clone ────────────────────────────────────────────────────────────
+
+mkdir -p "$PROJECTS"
+CLONE="$PROJECTS/$PROJECT"
+if [ -d "$CLONE" ]; then
+  echo "info: clone already exists at $CLONE"
+else
+  echo "Cloning $REMOTE into $CLONE ..."
+  git clone --quiet "$REMOTE" "$CLONE" || die "clone of $REMOTE failed"
+fi
+
+# ── register (after a successful clone, so a failed adopt leaves no entry) ─
+
+mkdir -p "$DATA"
+
+TAG="[$MODE"
+[ -n "$YOLO" ] && TAG="$TAG +yolo"
+TAG="$TAG]"
+ENTRY="- $PROJECT $TAG - secondmate adoption (added $(date +%Y-%m-%d))"
+
+if registered "$PROJECT"; then
+  awk -v p="$PROJECT" -v e="$ENTRY" '$1=="-" && $2==p { print e; next } { print }' "$REG" > "$REG.tmp" \
+    && mv "$REG.tmp" "$REG"
+  echo "Updated $PROJECT in $REG (mode: $MODE${YOLO:+, yolo})"
+else
+  printf '%s\n' "$ENTRY" >> "$REG"
+  echo "Registered $PROJECT in $REG"
+fi
+
+# ── persist (optional) ───────────────────────────────────────────────
+
+if [ -n "$PERSIST" ]; then
+  FM_SEED="$FM_DIR/bin/fm-home-seed.sh"
+  SM_HOME="$HOME/.local/share/firstmate-secondmates/$NAME"
+
+  if [ -x "$FM_SEED" ]; then
+    echo "Creating persistent secondmate home: $SM_HOME ..."
+    FM_SECONDMATE_CHARTER="Handle $PROJECT tasks from worktree $WORKTREE" \
+    FM_SECONDMATE_SCOPE="$PROJECT development, bug fixes, features, and PR reviews" \
+    "$FM_SEED" "$NAME" "$SM_HOME" "$PROJECT" || {
+      echo "warning: persistent secondmate creation failed; $PROJECT is still adopted" >&2
+    }
+  else
+    echo "warning: $FM_SEED not found; skipping persistent secondmate (project is still adopted)" >&2
+  fi
+fi
+
+# ── summary ──────────────────────────────────────────────────────────
+
+echo
+echo "=== $PROJECT is ready ==="
+echo
+echo "  Worktree:    $WORKTREE"
+echo "  Clone:       $CLONE"
+echo "  Mode:        $MODE ${YOLO:+(autonomous routine decisions)}"
+echo
+echo "  You can now say:"
+echo "    'fix the login bug in $PROJECT'"
+echo "    'review PR #42 in $PROJECT'"
+echo "    'add tests for the auth module in $PROJECT'"
+echo
+echo "  Firstmate will dispatch crewmates in isolated treehouse worktrees."
+echo "  After PRs merge, fleet sync updates $CLONE."
+echo
+echo "  Pull into your worktree when ready:"
+echo "    git -C $WORKTREE pull origin $DEFAULT_BRANCH"
+echo
+if [ -n "$PERSIST" ]; then
+  echo "  Persistent secondmate: $NAME (home: $SM_HOME)"
+  echo "  Clean up when done:"
+  echo "    secondmate $WORKTREE --cleanup"
+  echo "    $FM_DIR/bin/fm-teardown.sh $NAME"
+else
+  echo "  Clean up when done:"
+  echo "    secondmate $WORKTREE --cleanup"
+fi
