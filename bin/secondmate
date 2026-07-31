@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # secondmate — adopt a git worktree into the firstmate fleet.
 #
-# Usage: secondmate <worktree-path> [--name <id>] [--mode no-mistakes|direct-PR|local-only] [--yolo] [--persist] [--cleanup]
+# Usage: secondmate [<worktree-path>] [--name <id>] [--mode no-mistakes|direct-PR|local-only] [--yolo] [--persist] [--cleanup]
 #
-# Takes any git worktree, detects the project from its origin remote,
+# Without a path, uses the current directory. Takes any git worktree, detects the project from its origin remote,
 # registers it in firstmate's data/projects.md, and clones it into
 # projects/<name>/. With --persist it also provisions a persistent
 # secondmate home that survives restarts. Firstmate becomes immediately
@@ -28,11 +28,12 @@ die() { echo "error: $*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-usage: secondmate <worktree-path> [--name <id>] [--mode no-mistakes|direct-PR|local-only] [--yolo] [--persist] [--cleanup]
+usage: secondmate [<worktree-path>] [--name <id>] [--mode no-mistakes|direct-PR|local-only] [--yolo] [--persist] [--cleanup]
 
 Adopt a git worktree so firstmate can dispatch crewmates for its project.
-The project is detected from the worktree's origin remote, registered in
-firstmate's data/projects.md, and cloned into projects/<name>/.
+Without a path, uses the current directory. The project is detected from the
+worktree's origin remote, registered in firstmate's data/projects.md, and
+cloned into projects/<name>/.
 
   --name      Secondmate id (default: derived from the project name)
   --mode      Delivery mode (default: no-mistakes)
@@ -88,7 +89,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-[ -n "$WORKTREE" ] || { usage >&2; exit 1; }
+WORKTREE="${WORKTREE:-$PWD}"
 [ -d "$WORKTREE" ] || die "$WORKTREE is not a directory"
 git -C "$WORKTREE" rev-parse --git-dir >/dev/null 2>&1 \
   || die "$WORKTREE is not a git repository (no .git)"
